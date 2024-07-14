@@ -8,7 +8,7 @@ from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_poo
 from torch_geometric.nn.inits import glorot, zeros
 from torch_geometric.utils import add_self_loops, degree, softmax
 
-
+import os
 import math
 from typing import Optional, Tuple, Union
 
@@ -23,7 +23,6 @@ from torch_geometric.utils import softmax
 
 from torch_geometric.nn import aggr
 import pandas as pd
-import os
 
 class TransformerConv(MessagePassing):
     r"""The graph transformer operator from the `"Masked Label Prediction:
@@ -170,6 +169,10 @@ class TransformerConv(MessagePassing):
         fold_n: int,
         layer: str,
         dataset: str,
+        batch_df: pd.DataFrame,
+        graph_output_folder: str,
+        analysis_save_path: str,
+        num_node: int,
         edge_attr: OptTensor = None,
         return_attention_weights=None,
     ):
@@ -201,10 +204,11 @@ class TransformerConv(MessagePassing):
         query = self.lin_query(x[1]).view(-1, H, C)
         key = self.lin_key(x[0]).view(-1, H, C)
         value = self.lin_value(x[0]).view(-1, H, C)
+        all_edge_index = edge_index.clone()
 
         # propagate_type: (query: Tensor, key:Tensor, value: Tensor, edge_attr: OptTensor) # noqa
-        out = self.propagate(edge_index, query=query, key=key, value=value,
-                             edge_attr=edge_attr, size=None)
+        out = self.propagate(edge_index, all_edge_index=all_edge_index, query=query, key=key, value=value,
+                             edge_attr=edge_attr, batch_df=batch_df, graph_output_folder=graph_output_folder, analysis_save_path=analysis_save_path, num_node=num_node, size=None)
 
         alpha = self._alpha
         self._alpha = None
@@ -232,8 +236,9 @@ class TransformerConv(MessagePassing):
         else:
             return out
 
-    def message(self, query_i: Tensor, key_j: Tensor, value_j: Tensor,
-                edge_attr: OptTensor, index: Tensor, ptr: OptTensor,
+    def message(self, all_edge_index: Tensor, query_i: Tensor, key_j: Tensor, value_j: Tensor,
+                edge_attr: OptTensor, index: Tensor, batch_df: pd.DataFrame,  
+                graph_output_folder: str, analysis_save_path: str, ptr: OptTensor, num_node: int,
                 size_i: Optional[int]) -> Tensor:
 
         if self.lin_edge is not None:
@@ -242,30 +247,49 @@ class TransformerConv(MessagePassing):
                                                       self.out_channels)
             key_j = key_j + edge_attr
 
+        # import pdb; pdb.set_trace()
+        print(all_edge_index.shape)
         alpha = (query_i * key_j).sum(dim=-1) / math.sqrt(self.out_channels)
         alpha = softmax(alpha, index, ptr, size_i)
-        self._alpha = alpha
-        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+
+        # CACULATE THE ATTENTION
+        batch_size = batch_df.shape[0]
+        batch_alpha = alpha.clone()
+        batch_alpha = batch_alpha.reshape(batch_size, -1)
+        batch_edgeindex = all_edge_index.clone()
+        batch_edgeindex = batch_edgeindex.t().reshape(batch_size, -1, 2)
+
+        # PREPARE [Patient Sample] MAP
+        survival_label_map_df = pd.read_csv('./' + graph_output_folder + '/survival_label_map_dict.csv')
+        survival_label_map_dict = dict(zip(survival_label_map_df.individualID, survival_label_map_df.individualID_Num))
 
         # import pdb; pdb.set_trace()
-        dataset = self.dataset
-        gene_edge_num_all_df = pd.read_csv('./' + dataset + '-graph-data/all-gene-edge-num.csv')
-        weight_gene_edge_num_all_df = gene_edge_num_all_df.copy()
-        edge_weight_from = alpha[:,0].cpu().detach().numpy()
-        edge_weight_to = alpha[:,1].cpu().detach().numpy()
-        weight_gene_edge_num_all_df['edge_weight_from'] = edge_weight_from
-        weight_gene_edge_num_all_df['edge_weight_to'] = edge_weight_to
-        weight_gene_edge_num_all_df['edge_weight_avg'] = (edge_weight_from + edge_weight_to) / 2
+        for batch_idx in range(batch_size):
+            input_row = batch_df.iloc[batch_idx]
+            survival_label = input_row.iloc[0]
+            survival_label_num = survival_label_map_dict[survival_label]
+            survival_label_save_path = analysis_save_path + '/survival' + str(survival_label_num) + '.csv'
+            if os.path.isfile(survival_label_save_path) == True:
+                continue
 
-        save_path = './' + dataset + '-analysis/fold_' + str(self.fold_n)
-        while os.path.exists(save_path) == False:
-            os.mkdir(save_path)
-        weight_gene_edge_num_all_df.to_csv(save_path + '/' + self.layer + '_edge_weight.csv', index=False, header=True)
+            # import pdb; pdb.set_trace()
+            from_array = batch_edgeindex[batch_idx, :, 0] - (batch_idx * num_node)
+            to_array = batch_edgeindex[batch_idx, :, 1] - (batch_idx * num_node)
+
+            from_list =  list(from_array.cpu().detach().numpy())
+            to_list =  list(to_array.cpu().detach().numpy())
+            attention_list = list(batch_alpha[batch_idx].cpu().detach().numpy())
+            survival_label_att_df = pd.DataFrame({'From': from_list,
+                                             'To': to_list,
+                                             'Attention': attention_list})
+            # import pdb; pdb.set_trace()
+            survival_label_att_df.to_csv(survival_label_save_path, index=False, header=True)
 
         out = value_j
         if edge_attr is not None:
             out = out + edge_attr
-
+        alpha = F.dropout(alpha, p=self.dropout, training=self.training)
+        self._alpha = alpha
         out = out * alpha.view(-1, self.heads, 1)
         return out
 
@@ -317,22 +341,26 @@ class GraphFormerDecoder(nn.Module):
         conv_last = TransformerConv(in_channels=hidden_dim*self.num_head, out_channels=embedding_dim, heads=self.num_head)
         return conv_first, conv_block, conv_last
 
-    def forward(self, x, embedding, edge_index):
-        # import pdb; pdb.set_trace()
-
+    def forward(self, x, embedding, edge_index, batch_random_final_dl_input_df, fold_n, dataset):
         # Concat pretrained embedding with input features
         pretrain_embedding = self.pretrain_transform(embedding)
         x = torch.cat([x, pretrain_embedding], dim=-1)
 
-        x = self.conv_first(x, edge_index)
+        num_node = self.num_node
+        graph_output_folder = dataset + '-graph-data'
+        analysis_save_path = './' + dataset + '-analysis/fold_' + str(fold_n)
+        x = self.conv_first(x=x, edge_index=edge_index, fold_n=fold_n, layer='first',
+                            dataset=dataset, batch_df=batch_random_final_dl_input_df, graph_output_folder=graph_output_folder, analysis_save_path=analysis_save_path, num_node=num_node)
         x = self.x_norm_first(x)
         x = self.act2(x)
 
-        x = self.conv_block(x, edge_index)
+        x = self.conv_block(x=x, edge_index=edge_index, fold_n=fold_n, layer='block',
+                            dataset=dataset, batch_df=batch_random_final_dl_input_df, graph_output_folder=graph_output_folder, analysis_save_path=analysis_save_path, num_node=num_node)
         x = self.x_norm_block(x)
         x = self.act2(x)
 
-        x = self.conv_last(x, edge_index)
+        x = self.conv_last(x=x, edge_index=edge_index, fold_n=fold_n, layer='last',
+                            dataset=dataset, batch_df=batch_random_final_dl_input_df, graph_output_folder=graph_output_folder, analysis_save_path=analysis_save_path, num_node=num_node)
         x = self.x_norm_last(x)
         x = self.act2(x)
         

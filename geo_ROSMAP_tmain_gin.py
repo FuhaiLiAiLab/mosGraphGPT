@@ -142,7 +142,9 @@ def train_geogin(args, fold_n, load_path, iteration_num, device, graph_output_fo
     print('--- LOADING TRAINING FILES ... ---')
     xTr = np.load(form_data_path + '/xTr' + str(fold_n) + '.npy')
     yTr = np.load(form_data_path + '/yTr' + str(fold_n) + '.npy')
-    edge_index = torch.from_numpy(np.load(form_data_path + '/edge_index.npy') ).long() 
+    all_edge_index = torch.from_numpy(np.load(form_data_path + '/edge_index.npy') ).long()
+    internal_edge_index = torch.from_numpy(np.load(form_data_path + '/internal_edge_index.npy') ).long()
+    ppi_edge_index = torch.from_numpy(np.load(form_data_path + '/ppi_edge_index.npy') ).long()
 
     # Build [WeightBiGNN, DECODER] model
     model = build_geogin_model(args, device, graph_output_folder, num_class)
@@ -169,13 +171,13 @@ def train_geogin(args, fold_n, load_path, iteration_num, device, graph_output_fo
     test_loss_list = []
     test_acc_list = []
     # Clean result previous epoch_i_pred files
-    folder_name = 'epoch_' + str(epoch_num)
-    path = './' + dataset + '-result/%s' % (folder_name)
+    folder_name = 'epoch_' + str(epoch_num) + '_fold_' + str(fold_n)
+    path = './' + dataset + '-result/' + args.train_result_path + '/%s' % (folder_name)
     unit = 1
-    while os.path.exists('./' + dataset + '-result') == False:
-        os.mkdir('./' + dataset + '-result')
+    while os.path.exists('./' + dataset + '-result/' + args.train_result_path) == False:
+        os.mkdir('./' + dataset + '-result/' + args.train_result_path)
     while os.path.exists(path):
-        path = './' + dataset + '-result/%s_%d' % (folder_name, unit)
+        path = './' + dataset + '-result/' + args.train_result_path + '/%s_%d' % (folder_name, unit)
         unit += 1
     os.mkdir(path)
     # import pdb; pdb.set_trace()
@@ -195,7 +197,7 @@ def train_geogin(args, fold_n, load_path, iteration_num, device, graph_output_fo
                 upper_index = index + batch_size
             else:
                 upper_index = dl_input_num
-            geo_datalist = read_batch(index, upper_index, xTr, yTr, num_feature, num_node, edge_index, graph_output_folder)
+            geo_datalist = read_batch(index, upper_index, xTr, yTr, num_feature, num_node, all_edge_index, internal_edge_index, ppi_edge_index, graph_output_folder)
             dataset_loader, node_num, feature_dim = GeoGraphLoader.load_graph(geo_datalist, args)
             # Activate learning rate schedule
             iteration_num += 1

@@ -25,3 +25,6 @@
 # Ignore the result
 /UCSC-result/
 /ROSMAP-result/
+
+# Ignore the analysis on fold
+/ROSMAP-analysis/*fold_*
