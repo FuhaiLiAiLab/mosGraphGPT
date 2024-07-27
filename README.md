@@ -1,1 +1,1 @@
-# mosFoundation
+# mosGraphGPT
