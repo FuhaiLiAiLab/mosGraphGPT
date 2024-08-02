@@ -26,8 +26,8 @@ print(top)
 # Function to process and plot graph
 process_and_plot_graph <- function(type) {
   # Set working directory
-  setwd('E:/LabWork/mosFoundation2')
-  # setwd('C:/Users/hemingzhang/Documents/vs-files/mosFoundation')
+  # setwd('E:/LabWork/mosFoundation2')
+  setwd('C:/Users/hemingzhang/Documents/vs-files/mosFoundation')
 
   # Read network edge weight data
   net_edge_weight <- read.csv(paste0('./ROSMAP-analysis/fold_0/average_attention_', type, '_final_', top,'.csv'))
